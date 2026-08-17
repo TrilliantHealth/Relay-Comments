@@ -16,9 +16,12 @@ check(
 );
 check(!/obsidian/i.test(manifest.id), "manifest id must not include Obsidian");
 check(!/obsidian/i.test(manifest.name), "manifest name must not include Obsidian");
+// The `-th.N` suffix marks a Trilliant Health fork build carrying a patch upstream has not
+// released yet. It sorts above its base version and below the next upstream one, and upstream
+// will never mint one, so it cannot collide with a future official release.
 check(
-	/^\d+\.\d+\.\d+$/.test(manifest.version),
-	"manifest version must use x.y.z SemVer",
+	/^\d+\.\d+\.\d+(-th\.\d+)?$/.test(manifest.version),
+	"manifest version must use x.y.z SemVer, optionally with a -th.N fork suffix",
 );
 check(
 	manifest.version === packageJson.version,
