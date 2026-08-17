@@ -72,6 +72,7 @@ import {
 	getRelayIdentitySupportStatus,
 	providerById,
 	selectIdentityProvider,
+	withConfiguredDecoration,
 } from "./identity/providers";
 import type {
 	Identity,
@@ -1353,7 +1354,17 @@ export default class RelayCommentsPlugin
 			if (!resolver.isAvailable()) continue;
 			try {
 				const identity = await resolver.resolveUser(author, path);
-				if (identity) return providerIdentity(identity, resolver.id);
+				if (identity) {
+					return providerIdentity(
+						resolver.id === this.configuredIdentityResolver.id
+							? identity
+							: withConfiguredDecoration(
+									identity,
+									this.resolveConfiguredIdentity(author, path),
+								),
+						resolver.id,
+					);
+				}
 			} catch {
 				// Resolver failures degrade to the unresolved author value
 				// instead of breaking review rendering.
@@ -1362,6 +1373,23 @@ export default class RelayCommentsPlugin
 		const local = this.getLocalReviewerIdentity();
 		if (local?.id === author) return local;
 		return null;
+	}
+
+	/** The configured directory's record for an author, for decoration only. */
+	private resolveConfiguredIdentity(
+		author: string,
+		path: string,
+	): Identity | null {
+		if (!this.configuredIdentityResolver.isAvailable()) return null;
+
+		try {
+			return (
+				this.configuredIdentityResolver.resolveUserSnapshot?.(author, path) ??
+				null
+			);
+		} catch {
+			return null;
+		}
 	}
 
 	private resolveAuthorIdentitySnapshot(
@@ -1378,7 +1406,17 @@ export default class RelayCommentsPlugin
 			if (!resolver.resolveUserSnapshot) return undefined;
 			try {
 				const identity = resolver.resolveUserSnapshot(author, path);
-				if (identity) return providerIdentity(identity, resolver.id);
+				if (identity) {
+					return providerIdentity(
+						resolver.id === this.configuredIdentityResolver.id
+							? identity
+							: withConfiguredDecoration(
+									identity,
+									this.resolveConfiguredIdentity(author, path),
+								),
+						resolver.id,
+					);
+				}
 			} catch {
 				return undefined;
 			}
@@ -2007,6 +2045,7 @@ function providerIdentity(
 		source,
 	};
 }
+
 
 function sanitizeCommentText(value: string): string {
 	return value
