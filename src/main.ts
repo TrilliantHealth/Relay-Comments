@@ -11,9 +11,14 @@ import {
 	type Hotkey,
 	type MarkdownFileInfo,
 	type Menu,
+	requireApiVersion,
 	type TFile,
 	type WorkspaceLeaf,
 } from "obsidian";
+import { ReviewEventLog } from "./cli/events";
+import type { ReviewEventFeed } from "./cli/feed";
+import { attachReviewEventFeed, buildCliContext, windowTimers } from "./cli/context";
+import { registerRelayCommentsCli } from "./cli/registerCli";
 import {
 	getComposerSubmitScopeBinding,
 	isComposerSubmitKey,
@@ -55,6 +60,7 @@ import {
 	wrapSelection,
 	addSubstitution,
 	getCurrentMark,
+	markForRange,
 } from "./editor/commands";
 import {
 	createReviewEditorExtension,
@@ -68,6 +74,7 @@ import {
 } from "./editor/selection-trust";
 import { matchRenderedAnchor, runsTouching } from "./preview/blocks";
 import { isEditorReadOnly, READ_ONLY_NOTICE } from "./editor/access";
+import { narrowAnchorRange } from "./critic/anchor-range";
 import {
 	ADD_COMMENT_HOTKEYS,
 	getAddCommentTarget,
@@ -206,6 +213,11 @@ export default class RelayCommentsPlugin
 	private lastMarkdownPath: string | null = null;
 	private lastContentLeaf: WorkspaceLeaf | null = null;
 	private externalCommentObserver: MutationObserver | null = null;
+	/** Per editor, the selection CodeMirror last reported and the document it was in. */
+	private editorSelectionSnapshots = new WeakMap<
+		CodeMirrorEditorView,
+		{ doc: CodeMirrorEditorView["state"]["doc"]; from: number; to: number }
+	>();
 	private externalCommentRefreshTimer: number | null = null;
 	private reviewSidebarOpenPromise: Promise<void> | null = null;
 	private sidebarRefreshTimer: number | null = null;
@@ -222,6 +234,8 @@ export default class RelayCommentsPlugin
 	private readonly identityRequests = new Map<string, Promise<void>>();
 	private identityRevision = 0;
 	private settingsTab: RelayCommentsSettingTab | null = null;
+	private reviewEvents: ReviewEventLog | null = null;
+	private reviewEventFeed: ReviewEventFeed | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -267,6 +281,7 @@ export default class RelayCommentsPlugin
 
 		this.registerCommands();
 		this.registerWorkspaceEvents();
+		this.registerCli();
 		this.captureActiveContentLeaf(
 			this.app.workspace.getActiveViewOfType(ItemView)?.leaf ?? null,
 		);
@@ -315,6 +330,10 @@ export default class RelayCommentsPlugin
 	}
 
 	onunload(): void {
+		this.reviewEventFeed?.dispose();
+		this.reviewEventFeed = null;
+		this.reviewEvents?.dispose();
+		this.reviewEvents = null;
 		this.canvasPins?.stop();
 		this.canvasPins = null;
 		this.externalCommentObserver?.disconnect();
@@ -398,8 +417,41 @@ export default class RelayCommentsPlugin
 	}
 
 	notifyEditorSelectionChanged(editorView?: CodeMirrorEditorView): void {
-		if (editorView) this.rememberReviewEditor(editorView);
+		if (editorView) {
+			this.rememberReviewEditor(editorView);
+			this.snapshotSelection(editorView);
+		}
 		this.scheduleReviewSidebarRefresh(120);
+	}
+
+	/** A background edit keeps its editor's selection current without making
+	    that editor the reviewed one. */
+	notifyEditorDocumentChanged(editorView: CodeMirrorEditorView): void {
+		this.snapshotSelection(editorView);
+	}
+
+	notifyEditorDocumentReplaced(editorView: CodeMirrorEditorView): void {
+		this.editorSelectionSnapshots.delete(editorView);
+	}
+
+	private snapshotSelection(editorView: CodeMirrorEditorView): void {
+		const { from, to } = editorView.state.selection.main;
+		this.editorSelectionSnapshots.set(editorView, {
+			doc: editorView.state.doc,
+			from,
+			to,
+		});
+	}
+
+	/** The selection CodeMirror last reported for this editor and document, or null while
+	    the editor holds a document its selection has not been set in yet. */
+	private trustedSelection(
+		editorView: CodeMirrorEditorView | null | undefined,
+	): { from: number; to: number } | null {
+		if (!editorView) return null;
+		const snapshot = this.editorSelectionSnapshots.get(editorView);
+		if (!snapshot || snapshot.doc !== editorView.state.doc) return null;
+		return { from: snapshot.from, to: snapshot.to };
 	}
 
 	notifyRenderedCommentsChanged(): void {
@@ -1279,12 +1331,16 @@ export default class RelayCommentsPlugin
 		const text = editor.getValue();
 		const marks = parseCriticMarkup(text);
 		const nativeHighlights = parseNativeHighlights(text, marks);
-		const activeMark = getCurrentMark(editor);
-		const cursorOffset = editor.posToOffset(editor.getCursor("from"));
-		const activeNativeHighlight = findNativeHighlightAtOffset(
-			nativeHighlights,
-			cursorOffset,
-		);
+		// The cursor thread comes from what CodeMirror reported for this
+		// document. While a pane loads another note, the editor's own cursor
+		// still points into the old one.
+		const selection = this.trustedSelection(surface.editorView);
+		const activeMark = selection
+			? markForRange(marks, selection.from, selection.to)
+			: null;
+		const activeNativeHighlight = selection
+			? findNativeHighlightAtOffset(nativeHighlights, selection.from)
+			: null;
 		return {
 			file,
 			editor,
@@ -1346,7 +1402,6 @@ export default class RelayCommentsPlugin
 			new Notice("Open a Markdown note before adding a comment.");
 			return;
 		}
-		// CriticMarkup can't express overlapping marks.
 		const editorText = surface?.editor.getValue();
 		if (editorText !== undefined) {
 			const range = commentDraftContentRange(editorText, from, to);
@@ -1358,6 +1413,27 @@ export default class RelayCommentsPlugin
 			selectedText = editorText.slice(from, to);
 		}
 		const marks = editorText ? parseCriticMarkup(editorText) : [];
+		const nativeHighlights = editorText
+			? parseNativeHighlights(editorText, marks)
+			: [];
+		// A complete native highlight is matched on the raw selection; any other
+		// selection anchors to the text after its line's block syntax.
+		const nativeHighlight = findNativeHighlightForSelection(
+			nativeHighlights,
+			from,
+			to,
+		);
+		if (!nativeHighlight && editorText) {
+			const anchor = narrowAnchorRange(editorText, from, to);
+			if (!anchor) {
+				new Notice("Select text to comment on.");
+				return;
+			}
+			from = anchor.from;
+			to = anchor.to;
+			selectedText = editorText.slice(from, to);
+		}
+		// CriticMarkup can't express overlapping marks.
 		if (
 			editorText &&
 			marks.some(
@@ -1369,14 +1445,6 @@ export default class RelayCommentsPlugin
 			);
 			return;
 		}
-		const nativeHighlights = editorText
-			? parseNativeHighlights(editorText, marks)
-			: [];
-		const nativeHighlight = findNativeHighlightForSelection(
-			nativeHighlights,
-			from,
-			to,
-		);
 		const overlappingNativeHighlight = nativeHighlights.some(
 			(highlight) => highlight.from < to && highlight.to > from,
 		);
@@ -1438,10 +1506,8 @@ export default class RelayCommentsPlugin
 			);
 			return;
 		}
-		const fromPos = editor.getCursor("from");
-		const toPos = editor.getCursor("to");
-		const from = editor.posToOffset(fromPos);
-		const to = editor.posToOffset(toPos);
+		const from = editor.posToOffset(editor.getCursor("from"));
+		const to = editor.posToOffset(editor.getCursor("to"));
 		const selectedText = editor.getSelection();
 		if (from === to || selectedText.length === 0) {
 			new Notice("Select text to comment on.");
@@ -1498,7 +1564,7 @@ export default class RelayCommentsPlugin
 			? null
 			: commentDraftContentRange(documentText, draft.from, draft.to);
 		if (!nativeHighlight && !range) {
-			new Notice("Select text within one block line to comment on it.");
+			new Notice("The commented text changed; select it again within one block line.");
 			return;
 		}
 		this.commentDraft = null;
@@ -2503,6 +2569,37 @@ export default class RelayCommentsPlugin
 			this.lastMarkdownPath = resolved.file.path;
 		}
 		return resolved;
+	}
+
+	/**
+	 * Register the `comments` command family with the Obsidian CLI. Needs a
+	 * desktop app that exposes registerCliHandler (1.12.2 and later); older
+	 * apps and mobile get no commands and no error. Vault events feed the
+	 * watch log once the layout is ready, so the initial file index never
+	 * registers as activity; until something is watched they cost a path
+	 * check and nothing more.
+	 */
+	private registerCli(): void {
+		if (!Platform.isDesktopApp || !requireApiVersion("1.12.2")) return;
+		const registrar = this as unknown as { registerCliHandler?: unknown };
+		if (typeof registrar.registerCliHandler !== "function") return;
+		const events = new ReviewEventLog({ timers: windowTimers });
+		this.reviewEvents = events;
+		const ctx = buildCliContext(this, events);
+		registerRelayCommentsCli(this, ctx);
+		this.app.workspace.onLayoutReady(() => {
+			if (this.reviewEvents !== events) return;
+			this.reviewEventFeed = attachReviewEventFeed(this, ctx);
+		});
+	}
+
+	/** The open Markdown view showing a note, for edits that should go through its editor. */
+	findOpenMarkdownView(path: string): MarkdownView | null {
+		return this.getMarkdownViewByPath(path);
+	}
+
+	noteEditorIsReadOnly(editor: Editor): boolean {
+		return this.editorIsReadOnly(editor);
 	}
 
 	private getMarkdownViewByPath(path: string): MarkdownView | null {

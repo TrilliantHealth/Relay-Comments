@@ -1,6 +1,7 @@
 import { ChangeSet, EditorSelection, EditorState } from "@codemirror/state";
 import { describe, expect, it } from "@jest/globals";
 import { parseCriticMarkup } from "src/critic/parse";
+import { narrowAnchorRange } from "src/critic/anchor-range";
 import { buildCommentDraftInsertion, mapCommentDraftAnchor } from "src/editor/comment-draft-anchor";
 import { commentDraftContentRange } from "src/editor/comment-draft-range";
 import { findNativeHighlightForSelection, parseNativeHighlights } from "src/markdown/highlights";
@@ -20,7 +21,7 @@ describe("block comment content ranges", () => {
 		"1. ", "12) ", "- ", "* ", "+ ",
 		"- [ ] ", "- [x] ", "- [X] ", "2. [ ] ",
 		"# ", "## ", "###### ", "> ", ">> ", "> > ",
-		"  - ", "    - ", "> - [ ] ", "- > ", "> ## ", "1.\t",
+		"  - ", "    - ", "\t- ", "> - [ ] ", "- > ", "> ## ", "1.\t",
 	])("preserves the %j prefix and following block", (prefix) => {
 		const before = "Earlier text.\n";
 		const line = prefix + "**Selected text.**";
@@ -76,9 +77,12 @@ describe("block comment content ranges", () => {
 		},
 	);
 
-	it.each(["```md\n", "~~~\n", "````\n```\n"])("leaves literal prefixes in fenced code unchanged (%j)", (fence) => {
+	it.each(["```md\n", "~~~\n", "````\n```\n"])("matches upstream narrowing for a code-text prefix (%j)", (fence) => {
 		const text = fence + "# literal code\n";
-		expect(commentDraftContentRange(text, fence.length, text.length)).toEqual({ from: fence.length, to: text.length });
+		expect(commentDraftContentRange(text, fence.length, text.length)).toEqual(
+			narrowAnchorRange(text, fence.length, text.length),
+		);
+		expect(insertComment(text, fence.length, text.length)).toBe(fence + "# {==literal code==}" + comment + "\n");
 	});
 
 	it("adjusts a block after a closed fence", () => {
@@ -95,6 +99,62 @@ describe("block comment content ranges", () => {
 
 	it.each(["- ", "# ", "> ", "- [ ] "])("refuses a prefix-only selection: %j", (text) => {
 		expect(commentDraftContentRange(text, 0, text.length)).toBeNull();
+	});
+
+	it.each(["1. item", "- item", "- [ ] task", "# heading", "> quote", "> - item"])(
+		"refuses a selection starting before a later block: %j", (line) => {
+			const text = "plain text\n" + line;
+			expect(commentDraftContentRange(text, 0, text.length)).toBeNull();
+			expect(commentDraftContentRange(text, 10, text.length)).toBeNull();
+		},
+	);
+
+	it("does not include a block starting exactly at the selection end", () => {
+		const text = "plain text\n- item";
+		expect(commentDraftContentRange(text, 0, 11)).toEqual({ from: 0, to: 11 });
+	});
+
+	it("refuses even a partial later prefix using the full source line", () => {
+		const text = "plain text\n- item";
+		expect(commentDraftContentRange(text, 0, 12)).toBeNull();
+		expect(commentDraftContentRange("\n- item", 0, 2)).toBeNull();
+	});
+
+	it.each(["    - ambiguous", "\t- ambiguous", "     # ambiguous", ">    - ambiguous", "> \t# ambiguous"])(
+		"keeps indentation outside the anchor without guessing the block type: %j", (text) => {
+			expect(commentDraftContentRange(text, 0, text.length)).toEqual({ from: text.indexOf("ambiguous"), to: text.length });
+		},
+	);
+
+	it.each(["\t- ", "    - ", "\t\t- [ ] ", ">     ", "> \t- "])(
+		"allows both whole-line and content-only nested selections: %j", (prefix) => {
+			const before = "- parent\n";
+			const text = before + prefix + "b c";
+			const contentFrom = text.indexOf("b c");
+			for (const from of [before.length, contentFrom]) {
+				const range = commentDraftContentRange(text, from, text.length)!;
+				expect(range).toEqual({ from: contentFrom, to: text.length });
+				expect(narrowAnchorRange(text, range.from, range.to)).toEqual(range);
+				expect(insertComment(text, from, text.length)).toBe(before + prefix + "{==b c==}" + comment);
+			}
+		},
+	);
+
+	it.each([
+		["> ```\n", "> - literal code"],
+		["- ```\n", "  # literal code"],
+		["    ~~~\n", "    - literal code"],
+	])("keeps nested code containers outside the mark: %j", (before, line) => {
+		const text = before + line;
+		const contentFrom = text.indexOf("literal code");
+		expect(commentDraftContentRange(text, before.length, text.length)).toEqual({ from: contentFrom, to: text.length });
+		expect(insertComment(text, before.length, text.length)).toBe(text.slice(0, contentFrom) + "{==literal code==}" + comment);
+	});
+
+	it("adjusts a block after a closed nested fence", () => {
+		const before = "> ```\n> code\n> ```\n";
+		const text = before + "# Heading";
+		expect(insertComment(text, before.length, text.length)).toBe(before + "# {==Heading==}" + comment);
 	});
 
 	it("keeps empty selections at their surviving insertion point", () => {
