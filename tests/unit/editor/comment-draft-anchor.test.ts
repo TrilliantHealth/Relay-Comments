@@ -1,4 +1,4 @@
-import { ChangeSet } from "@codemirror/state";
+import { ChangeSet, EditorState } from "@codemirror/state";
 import { describe, expect, it } from "@jest/globals";
 import {
 	buildCommentDraftInsertion,
@@ -18,39 +18,42 @@ describe("pending comment anchors", () => {
 	it("moves with text inserted before the selected range", () => {
 		const changes = ChangeSet.of({ from: 2, insert: "hello" }, 30);
 
-		expect(mapCommentDraftAnchor(anchor, changes)).toMatchObject({
+		expect(mapCommentDraftAnchor(anchor, changes, EditorState.create({ doc: "x".repeat(30) }).doc)).toMatchObject({
 			from: 15,
 			to: 25,
 		});
 	});
 
-	it("includes text inserted inside the selected range", () => {
+	it("invalidates text inserted inside the selected range", () => {
 		const changes = ChangeSet.of({ from: 15, insert: "new" }, 30);
 
-		expect(mapCommentDraftAnchor(anchor, changes)).toMatchObject({
+		expect(mapCommentDraftAnchor(anchor, changes, EditorState.create({ doc: "x".repeat(30) }).doc)).toMatchObject({
 			from: 10,
 			to: 23,
+			invalidated: true,
 		});
 	});
 
-	it("follows a replacement of the entire selected range", () => {
+	it("invalidates a replacement of the entire selected range", () => {
 		const changes = ChangeSet.of(
 			{ from: 10, to: 20, insert: "replacement" },
 			30,
 		);
 
-		expect(mapCommentDraftAnchor(anchor, changes)).toMatchObject({
+		expect(mapCommentDraftAnchor(anchor, changes, EditorState.create({ doc: "x".repeat(30) }).doc)).toMatchObject({
 			from: 10,
 			to: 21,
+			invalidated: true,
 		});
 	});
 
-	it("collapses to the surviving point when the selection is deleted", () => {
+	it("invalidates the anchor when the selection is deleted", () => {
 		const changes = ChangeSet.of({ from: 10, to: 20 }, 30);
 
-		expect(mapCommentDraftAnchor(anchor, changes)).toMatchObject({
+		expect(mapCommentDraftAnchor(anchor, changes, EditorState.create({ doc: "x".repeat(30) }).doc)).toMatchObject({
 			from: 10,
 			to: 10,
+			invalidated: true,
 		});
 	});
 
@@ -58,6 +61,7 @@ describe("pending comment anchors", () => {
 		const shifted = mapCommentDraftAnchor(
 			anchor,
 			ChangeSet.of({ from: 2, insert: "hello" }, 30),
+			EditorState.create({ doc: "x".repeat(30) }).doc,
 		);
 
 		expect(commentDraftKey(shifted)).toBe(commentDraftKey(anchor));

@@ -12,6 +12,7 @@ import {
 	type Extension,
 	type Range,
 	type Transaction,
+	type Text,
 } from "@codemirror/state";
 import {
 	Decoration,
@@ -88,6 +89,8 @@ export interface ReviewEditorController {
 		from: number,
 		to: number,
 		selectedText: string,
+		document: Text,
+		invalidated: boolean,
 	): void;
 }
 
@@ -191,14 +194,10 @@ export function createReviewEditorExtension(
 					value = effect.value;
 				}
 			}
-			if (
-				!value ||
-				!tr.docChanged ||
-				readPath(tr.state) !== value.filePath
-			) {
-				return value;
-			}
-			return mapCommentDraftAnchor(value, tr.changes);
+			if (!value) return value;
+			if (readPath(tr.state) !== value.filePath) return { ...value, invalidated: true };
+			if (!tr.docChanged) return value;
+			return mapCommentDraftAnchor(value, tr.changes, tr.startState.doc);
 		},
 	});
 
@@ -337,16 +336,17 @@ export function createReviewEditorExtension(
 				);
 				const draftAnchor = update.state.field(commentDraftAnchorField);
 				if (
-					update.docChanged &&
 					draftAnchor &&
-					readPath(update.state) === draftAnchor.filePath
+					(update.docChanged || update.startState.field(commentDraftAnchorField) !== draftAnchor)
 				) {
 					controller.updateCommentDraftAnchor(
 						draftAnchor.id,
 						draftAnchor.filePath,
 						draftAnchor.from,
 						draftAnchor.to,
-						update.state.sliceDoc(draftAnchor.from, draftAnchor.to),
+						draftAnchor.invalidated ? "" : update.state.sliceDoc(draftAnchor.from, draftAnchor.to),
+						update.state.doc,
+						draftAnchor.invalidated ?? false,
 					);
 				}
 				// Fragment offsets are the cell's, not the note's. Once the pane's

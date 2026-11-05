@@ -1,26 +1,46 @@
-import type { ChangeDesc } from "@codemirror/state";
+import { ChangeSet, type ChangeSpec, type Text } from "@codemirror/state";
 
 export interface CommentDraftAnchor {
 	id: number;
 	filePath: string;
 	from: number;
 	to: number;
+	invalidated?: boolean;
 }
 
-/**
- * Follow a pending comment range through a CodeMirror document change.
- * Inclusive boundary association keeps replacement text anchored when a
- * collaborator rewrites the entire selected range. A complete deletion
- * intentionally collapses the range to the surviving insertion point.
- */
+/** Map only changed text: external file loads can replace unchanged line content. */
 export function mapCommentDraftAnchor(
 	anchor: CommentDraftAnchor,
-	changes: ChangeDesc,
+	changes: ChangeSet,
+	before: Text,
 ): CommentDraftAnchor {
+	const edits: ChangeSpec[] = [];
+	let invalidated = anchor.invalidated ?? false;
+	changes.iterChanges((from, to, _fromB, _toB, inserted) => {
+		const oldText = before.sliceString(from, to);
+		const newText = inserted.toString();
+		if (oldText === newText) return;
+		const limit = Math.min(oldText.length, newText.length);
+		let prefix = 0;
+		while (prefix < limit && oldText[prefix] === newText[prefix]) prefix++;
+		let suffix = 0;
+		while (suffix < limit && oldText[oldText.length - suffix - 1] === newText[newText.length - suffix - 1]) suffix++;
+
+		// Overlapping equal edges admit multiple placements of an insertion/deletion.
+		// Refuse a draft touched by any such placement instead of choosing an occurrence.
+		const earliest = from + Math.min(prefix, limit - suffix);
+		const latest = to - Math.min(suffix, limit - prefix);
+		if (earliest < anchor.to && latest > anchor.from) invalidated = true;
+		suffix = Math.min(suffix, limit - prefix);
+		edits.push({ from: from + prefix, to: to - suffix, insert: newText.slice(prefix, newText.length - suffix) });
+	});
+	const mapped = ChangeSet.of(edits, before.length);
+	const from = mapped.mapPos(anchor.from, 1);
 	return {
 		...anchor,
-		from: changes.mapPos(anchor.from, -1),
-		to: changes.mapPos(anchor.to, 1),
+		from,
+		to: Math.max(from, mapped.mapPos(anchor.to, -1)),
+		invalidated,
 	};
 }
 

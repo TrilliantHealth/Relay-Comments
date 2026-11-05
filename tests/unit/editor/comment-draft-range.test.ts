@@ -171,11 +171,10 @@ describe("block comment content ranges", () => {
 		expect(parseCriticMarkup(result).map((mark) => mark.type)).toEqual(["comment"]);
 	});
 
-	it("recomputes the content boundary after an entire mapped range is rewritten", () => {
+	it("invalidates a draft after its entire range is rewritten", () => {
 		const text = "old text";
 		const changes = ChangeSet.of({ from: 0, to: text.length, insert: "# New heading\n" }, text.length);
-		const draft = mapCommentDraftAnchor({ id: 7, filePath: "note.md", from: 0, to: text.length }, changes);
-		const updatedText = changes.apply(EditorState.create({ doc: text }).doc).toString();
-		expect(insertComment(updatedText, draft.from, draft.to)).toBe("# {==New heading==}" + comment + "\n");
+		const draft = mapCommentDraftAnchor({ id: 7, filePath: "note.md", from: 0, to: text.length }, changes, EditorState.create({ doc: text }).doc);
+		expect(draft.invalidated).toBe(true);
 	});
 });
