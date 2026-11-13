@@ -135,7 +135,7 @@ test("does not convert a removed native highlight into a new anchor", async () =
 
 
 test("the editor state field maps external changes and invalidates a switch away and back", () => {
-	const extensions = createReviewEditorExtension({ getDisplayMode: () => "review" } as ReviewEditorController) as unknown[];
+	const extensions = createReviewEditorExtension({ getDisplayMode: () => "review" } as ReviewEditorController).extension as unknown[];
 	const field = extensions[1] as StateField<CommentDraftAnchor | null>;
 	const before = "- target and {==other==}{>>question<<}";
 	let state = EditorState.create({ doc: before, extensions: [field, editorInfoField] });

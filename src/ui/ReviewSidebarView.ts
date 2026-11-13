@@ -113,6 +113,7 @@ interface PendingFocus {
 }
 
 export class ReviewSidebarView extends ItemView {
+	private closed = false;
 	/** HoverParent for page previews spawned from links in comments. */
 	hoverPopover: HoverPopover | null = null;
 	private selectedItemId: string | null = null;
@@ -196,9 +197,27 @@ export class ReviewSidebarView extends ItemView {
 	}
 
 	protected async onClose(): Promise<void> {
+		this.dispose();
+	}
+
+	/** Release our UI while Obsidian keeps the leaf's position for re-enabling. */
+	dispose(): void {
+		if (this.closed) return;
+		this.closed = true;
 		this.clearCommentRenderScope();
 		this.removeOutsideClickListener?.();
 		this.removeOutsideClickListener = null;
+		this.replyDrafts.clear();
+		this.editDrafts.clear();
+		this.composerSubmits = new WeakMap();
+		this.draftText = "";
+		this.replyDraftTarget = null;
+		this.pendingFocus = null;
+		this.selectedItemId = this.pickSourceKey = this.replyDraftItemId = null;
+		this.editingCommentId = this.lastDraftKey = this.lastRenderedSourceKey = null;
+		this.hoverPopover?.unload();
+		this.hoverPopover = null;
+		this.contentEl.empty();
 	}
 
 	refresh(): void {
@@ -243,6 +262,7 @@ export class ReviewSidebarView extends ItemView {
 	}
 
 	private render(): void {
+		if (this.closed) return;
 		this.captureComposerValues();
 		const focusSnapshot = this.captureComposerFocus();
 		this.renderContent();
@@ -643,6 +663,9 @@ export class ReviewSidebarView extends ItemView {
 			const target = event.target as HTMLElement | null;
 			if (!target) return;
 			if (this.contentEl.contains(target)) {
+				// Keep Close mounted between mousedown and click. Detaching
+				// the leaf will dispose the selected thread and its drafts.
+				if (target.closest(".critic-sidebar-close-button")) return;
 				const clickedCard = target.closest(".critic-card");
 				if (clickedCard && this.contentEl.contains(clickedCard)) return;
 			}
@@ -729,7 +752,7 @@ export class ReviewSidebarView extends ItemView {
 			textarea.focus();
 			return;
 		}
-		this.plugin.cancelCommentDraft();
+		if (!this.closed) this.plugin.cancelCommentDraft();
 	}
 
 	private commitDraftComment(textarea: HTMLTextAreaElement): void {
@@ -1225,7 +1248,6 @@ export class ReviewSidebarView extends ItemView {
 			focusEditor: false,
 			select: false,
 		});
-		this.render();
 	}
 
 	private isEditingInItem(item: ReviewItem): boolean {
@@ -1244,7 +1266,6 @@ export class ReviewSidebarView extends ItemView {
 			focusEditor: false,
 			select: false,
 		});
-		this.render();
 	}
 
 	private renderCommentEditor(
@@ -1429,14 +1450,15 @@ export class ReviewSidebarView extends ItemView {
 		this.replyDrafts.delete(item.id);
 		this.replyDraftItemId = null;
 		this.replyDraftTarget = null;
-		if (!(await this.plugin.insertReplyToMark(mark, value))) {
+		const inserted = await this.plugin.insertReplyToMark(mark, value);
+		if (this.closed) return;
+		if (!inserted) {
 			textarea.value = previousValue;
 			this.replyDrafts.set(item.id, previousValue);
 			this.replyDraftItemId = item.id;
 			this.replyDraftTarget = toDraftTarget(item);
 			return;
 		}
-		this.render();
 	}
 
 	private keepComposerVisible(

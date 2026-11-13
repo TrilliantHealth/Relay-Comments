@@ -111,6 +111,7 @@ function usablePaneHeight(overlay: HTMLElement): number {
  * empty canvas adds freestanding pins on invisible carrier nodes.
  */
 export class CanvasCommentPins {
+	private interval: number | null = null;
 	private card: HTMLElement | null = null;
 	private cardKey: string | null = null;
 	/** The open card's thread as rendered, to notice changes made elsewhere. */
@@ -118,6 +119,7 @@ export class CanvasCommentPins {
 	/** The open card's parts that a refresh rebuilds or updates. */
 	private cardParts: CardParts | null = null;
 	private placement: (() => void) | null = null;
+	private placementTarget: HTMLElement | null = null;
 	private menuPatches: Array<{
 		el: HTMLElement;
 		listener: (event: MouseEvent) => void;
@@ -130,12 +132,14 @@ export class CanvasCommentPins {
 	constructor(private host: PinHost) {}
 
 	start(): void {
-		this.host.registerInterval(
-			window.setInterval(() => this.renderAll(), 400),
-		);
+		if (this.interval !== null) return;
+		this.interval = window.setInterval(() => this.renderAll(), 400);
+		this.host.registerInterval(this.interval);
 	}
 
 	stop(): void {
+		if (this.interval !== null) window.clearInterval(this.interval);
+		this.interval = null;
 		this.closeCard();
 		this.cancelPlacement();
 		for (const { el, listener } of this.menuPatches) {
@@ -159,6 +163,21 @@ export class CanvasCommentPins {
 	// ── Rendering ────────────────────────────────────────────────────
 
 	renderAll(): void {
+		if (this.interval === null) return;
+		// Closing the last Canvas leaves no view to render. Release its
+		// registrations here, before looking for any remaining open views.
+		this.menuPatches = this.menuPatches.filter(({ el, listener }) => {
+			if (el.isConnected) return true;
+			el.removeEventListener("contextmenu", listener, { capture: true });
+			return false;
+		});
+		this.viewportWatchers = this.viewportWatchers.filter(({ el, observer }) => {
+			if (el.isConnected) return true;
+			observer.disconnect();
+			return false;
+		});
+		if (this.card && !this.card.isConnected) this.closeCard();
+		if (this.placementTarget && !this.placementTarget.isConnected) this.cancelPlacement();
 		for (const leaf of this.host.getCanvasLeaves()) {
 			const view = leaf.view as unknown as CanvasViewLike;
 			if (view.canvas) {
@@ -502,11 +521,6 @@ export class CanvasCommentPins {
 	private watchViewport(view: CanvasViewLike, canvas: CanvasLike): void {
 		const el = canvas.canvasEl;
 		if (!el) return;
-		this.viewportWatchers = this.viewportWatchers.filter((watcher) => {
-			if (watcher.el.isConnected) return true;
-			watcher.observer.disconnect();
-			return false;
-		});
 		if (this.viewportWatchers.some((watcher) => watcher.el === el)) return;
 		const observer = new MutationObserver(() => {
 			const overlay = canvas.wrapperEl?.querySelector<HTMLElement>(
@@ -708,12 +722,14 @@ export class CanvasCommentPins {
 			target.removeEventListener("pointerup", onPointerUp, true);
 			document.removeEventListener("keydown", onKey, true);
 			this.placement = null;
+			this.placementTarget = null;
 		};
 		target.addEventListener("click", onClick, true);
 		target.addEventListener("pointerdown", onPointerDown, true);
 		target.addEventListener("pointerup", onPointerUp, true);
 		document.addEventListener("keydown", onKey, true);
 		this.placement = cleanup;
+		this.placementTarget = target;
 	}
 
 	private findNodeIdFromEventTarget(
